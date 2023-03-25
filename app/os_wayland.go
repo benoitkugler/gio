@@ -42,9 +42,13 @@ import (
 //go:generate wayland-scanner client-header /usr/share/wayland-protocols/unstable/xdg-decoration/xdg-decoration-unstable-v1.xml wayland_xdg_decoration.h
 //go:generate wayland-scanner private-code /usr/share/wayland-protocols/unstable/xdg-decoration/xdg-decoration-unstable-v1.xml wayland_xdg_decoration.c
 
+//go:generate wayland-scanner client-header /usr/share/wayland-protocols/unstable/tablet/tablet-unstable-v2.xml wayland_tablet.h
+//go:generate wayland-scanner private-code /usr/share/wayland-protocols/unstable/tablet/tablet-unstable-v2.xml wayland_tablet.c
+
 //go:generate sed -i "1s;^;//go:build ((linux \\&\\& !android) || freebsd) \\&\\& !nowayland\\n// +build linux,!android freebsd\\n// +build !nowayland\\n\\n;" wayland_xdg_shell.c
 //go:generate sed -i "1s;^;//go:build ((linux \\&\\& !android) || freebsd) \\&\\& !nowayland\\n// +build linux,!android freebsd\\n// +build !nowayland\\n\\n;" wayland_xdg_decoration.c
 //go:generate sed -i "1s;^;//go:build ((linux \\&\\& !android) || freebsd) \\&\\& !nowayland\\n// +build linux,!android freebsd\\n// +build !nowayland\\n\\n;" wayland_text_input.c
+//go:generate sed -i "1s;^;//go:build ((linux \\&\\& !android) || freebsd) \\&\\& !nowayland\\n// +build linux,!android freebsd\\n// +build !nowayland\\n\\n;" wayland_tablet.c
 
 /*
 #cgo linux pkg-config: wayland-client wayland-cursor
@@ -56,6 +60,7 @@ import (
 #include <wayland-client.h>
 #include <wayland-cursor.h>
 #include "wayland_text_input.h"
+#include "wayland_tablet.h"
 #include "wayland_xdg_shell.h"
 #include "wayland_xdg_decoration.h"
 
@@ -75,6 +80,8 @@ extern const struct zwp_text_input_v3_listener gio_zwp_text_input_v3_listener;
 extern const struct wl_data_device_listener gio_data_device_listener;
 extern const struct wl_data_offer_listener gio_data_offer_listener;
 extern const struct wl_data_source_listener gio_data_source_listener;
+extern const struct zwp_tablet_seat_v2_listener gio_zwp_tablet_seat_v2_listener;
+extern const struct zwp_tablet_tool_v2_listener gio_zwp_tablet_tool_v2_listener;
 */
 import "C"
 
@@ -91,6 +98,8 @@ type wlDisplay struct {
 	xkb               *xkb.Context
 	outputMap         map[C.uint32_t]*C.struct_wl_output
 	outputConfig      map[*C.struct_wl_output]*wlOutput
+
+	tabletmm *C.struct_zwp_tablet_manager_v2
 
 	// Notification pipe fds.
 	notify struct {
@@ -130,6 +139,9 @@ type wlSeat struct {
 	source *C.struct_wl_data_source
 	// content is the data belonging to source.
 	content []byte
+
+	// tablet events are grouped by frames
+	tabletMoves [2]C.wl_fixed_t
 }
 
 type repeatState struct {
@@ -692,6 +704,7 @@ func gio_onRegistryGlobal(data unsafe.Pointer, reg *C.struct_wl_registry, name C
 		callbackStore(unsafe.Pointer(s), d.seat)
 		C.wl_seat_add_listener(s, &C.gio_seat_listener, unsafe.Pointer(s))
 		d.bindDataDevice()
+		d.bindTableSeat()
 	case "wl_shm":
 		d.shm = (*C.struct_wl_shm)(C.wl_registry_bind(reg, name, &C.wl_shm_interface, 1))
 	case "xdg_wm_base":
@@ -704,6 +717,9 @@ func gio_onRegistryGlobal(data unsafe.Pointer, reg *C.struct_wl_registry, name C
 	case "wl_data_device_manager":
 		d.dataDeviceManager = (*C.struct_wl_data_device_manager)(C.wl_registry_bind(reg, name, &C.wl_data_device_manager_interface, 3))
 		d.bindDataDevice()
+	case "zwp_tablet_manager_v2":
+		// register the manager
+		d.tabletmm = (*C.struct_zwp_tablet_manager_v2)(C.wl_registry_bind(reg, name, &C.zwp_tablet_manager_v2_interface, 1))
 	}
 }
 
@@ -1830,6 +1846,9 @@ func (d *wlDisplay) destroy() {
 	if d.imm != nil {
 		C.zwp_text_input_manager_v3_destroy(d.imm)
 	}
+	if d.tabletmm != nil {
+		C.zwp_tablet_manager_v2_destroy(d.tabletmm)
+	}
 	if d.decor != nil {
 		C.zxdg_decoration_manager_v1_destroy(d.decor)
 	}
@@ -1861,4 +1880,141 @@ func fromFixed(v C.wl_fixed_t) float32 {
 	b := ((1023 + 44) << 52) + (1 << 51) + uint64(v)
 	f := math.Float64frombits(b) - (3 << 43)
 	return float32(f)
+}
+
+// table protocol
+
+func (d *wlDisplay) bindTableSeat() {
+	// query the tablet
+	tabletSeat := C.zwp_tablet_manager_v2_get_tablet_seat(d.tabletmm, d.seat.seat)
+	// add a listener, passing the seat
+	callbackStore(unsafe.Pointer(d.seat.seat), d.seat)
+	C.zwp_tablet_seat_v2_add_listener(tabletSeat, &C.gio_zwp_tablet_seat_v2_listener, unsafe.Pointer(d.seat.seat))
+}
+
+// tablet
+
+//export gio_onTabletAdded
+func gio_onTabletAdded(data unsafe.Pointer, seat *C.struct_zwp_tablet_seat_v2, id *C.struct_zwp_tablet_v2) {
+}
+
+//export gio_onToolAdded
+func gio_onToolAdded(data unsafe.Pointer, seat *C.struct_zwp_tablet_seat_v2, id *C.struct_zwp_tablet_tool_v2) {
+	// bind the new tool, passing the seat
+	C.zwp_tablet_tool_v2_add_listener(id, &C.gio_zwp_tablet_tool_v2_listener, data)
+}
+
+//export gio_onPadAdded
+func gio_onPadAdded(data unsafe.Pointer, seat *C.struct_zwp_tablet_seat_v2, id *C.struct_zwp_tablet_pad_v2) {
+}
+
+// tablet tool
+
+//export gio_onTabletToolType
+func gio_onTabletToolType(data unsafe.Pointer, tool *C.struct_zwp_tablet_tool_v2, tool_type C.uint32_t) {
+	print("tool_type ", tool_type)
+}
+
+//export gio_onTabletToolHardwareSerial
+func gio_onTabletToolHardwareSerial(data unsafe.Pointer,
+	tool *C.struct_zwp_tablet_tool_v2, hardware_serial_hi C.uint32_t, hardware_serial_lo C.uint32_t) {
+}
+
+//export gio_onTabletToolHardwareIdWacom
+func gio_onTabletToolHardwareIdWacom(data unsafe.Pointer,
+	tool *C.struct_zwp_tablet_tool_v2,
+	hardware_id_hi C.uint32_t,
+	hardware_id_lo C.uint32_t) {
+}
+
+//export gio_onTabletToolCapability
+func gio_onTabletToolCapability(data unsafe.Pointer,
+	tool *C.struct_zwp_tablet_tool_v2,
+	capability C.uint32_t) {
+}
+
+//export gio_onTabletToolDone
+func gio_onTabletToolDone(data unsafe.Pointer, tool *C.struct_zwp_tablet_tool_v2) {}
+
+//export gio_onTabletToolRemoved
+func gio_onTabletToolRemoved(data unsafe.Pointer, tool *C.struct_zwp_tablet_tool_v2) {}
+
+//export gio_onTabletToolProximityIn
+func gio_onTabletToolProximityIn(data unsafe.Pointer, tool *C.struct_zwp_tablet_tool_v2,
+	serial C.uint32_t,
+	tablet *C.struct_zwp_tablet_v2,
+	surface *C.struct_wl_surface) {
+}
+
+//export gio_onTabletToolProximityOut
+func gio_onTabletToolProximityOut(data unsafe.Pointer, tool *C.struct_zwp_tablet_tool_v2) {
+}
+
+//export gio_onTabletToolDown
+func gio_onTabletToolDown(data unsafe.Pointer, tool *C.struct_zwp_tablet_tool_v2, serial C.uint32_t) {
+}
+
+//export gio_onTabletToolUp
+func gio_onTabletToolUp(data unsafe.Pointer, tool *C.struct_zwp_tablet_tool_v2) {}
+
+//export gio_onTabletToolMotion
+func gio_onTabletToolMotion(data unsafe.Pointer, tool *C.struct_zwp_tablet_tool_v2,
+	x C.wl_fixed_t, y C.wl_fixed_t,
+) {
+	seat := callbackLoad(data).(*wlSeat)
+	seat.tabletMoves[0] = x
+	seat.tabletMoves[1] = y
+}
+
+//export gio_onTabletToolPressure
+func gio_onTabletToolPressure(data unsafe.Pointer, tool *C.struct_zwp_tablet_tool_v2,
+	pressure C.uint32_t) {
+}
+
+//export gio_onTabletToolDistance
+func gio_onTabletToolDistance(data unsafe.Pointer, tool *C.struct_zwp_tablet_tool_v2,
+	distance C.uint32_t) {
+}
+
+//export gio_onTabletToolTilt
+func gio_onTabletToolTilt(data unsafe.Pointer, tool *C.struct_zwp_tablet_tool_v2,
+	tilt_x C.wl_fixed_t,
+	tilt_y C.wl_fixed_t) {
+}
+
+//export gio_onTabletToolRotation
+func gio_onTabletToolRotation(data unsafe.Pointer, tool *C.struct_zwp_tablet_tool_v2,
+	degrees C.wl_fixed_t) {
+}
+
+//export gio_onTabletToolSlider
+func gio_onTabletToolSlider(data unsafe.Pointer,
+	tool *C.struct_zwp_tablet_tool_v2,
+	position C.int32_t) {
+}
+
+//export gio_onTabletToolWheel
+func gio_onTabletToolWheel(data unsafe.Pointer,
+	tool *C.struct_zwp_tablet_tool_v2,
+	degrees C.wl_fixed_t, clicks C.int32_t) {
+}
+
+//export gio_onTabletToolButton
+func gio_onTabletToolButton(data unsafe.Pointer,
+	tool *C.struct_zwp_tablet_tool_v2,
+	serial C.uint32_t,
+	button C.uint32_t,
+	state C.uint32_t) {
+}
+
+//export gio_onTabletToolFrame
+func gio_onTabletToolFrame(data unsafe.Pointer,
+	tool *C.struct_zwp_tablet_tool_v2,
+	time C.uint32_t,
+) {
+	seat := callbackLoad(data).(*wlSeat)
+	// FIXME: this seems to be incorrect, since w may be nil
+	w := seat.pointerFocus
+	w.resetFling()
+	w.onPointerMotion(seat.tabletMoves[0], seat.tabletMoves[1], time)
 }

@@ -8,6 +8,7 @@
 #include "wayland_xdg_shell.h"
 #include "wayland_xdg_decoration.h"
 #include "wayland_text_input.h"
+#include "wayland_tablet.h"
 #include "_cgo_export.h"
 
 const struct wl_registry_listener gio_registry_listener = {
@@ -98,6 +99,36 @@ const struct zwp_text_input_v3_listener gio_zwp_text_input_v3_listener = {
 	.delete_surrounding_text = gio_onTextInputDeleteSurroundingText,
 	.done = gio_onTextInputDone
 };
+
+const struct zwp_tablet_seat_v2_listener gio_zwp_tablet_seat_v2_listener = {
+	.tablet_added = gio_onTabletAdded,
+	.tool_added = gio_onToolAdded,
+	.pad_added = gio_onPadAdded
+};
+
+
+const struct zwp_tablet_tool_v2_listener gio_zwp_tablet_tool_v2_listener = {
+    .type = gio_onTabletToolType,
+    .hardware_serial = gio_onTabletToolHardwareSerial,
+    .hardware_id_wacom = gio_onTabletToolHardwareIdWacom,
+    .capability = gio_onTabletToolCapability,
+    .done = gio_onTabletToolDone,
+    .removed = gio_onTabletToolRemoved,
+    .proximity_in = gio_onTabletToolProximityIn,
+    .proximity_out = gio_onTabletToolProximityOut,
+    .down = gio_onTabletToolDown,
+    .up = gio_onTabletToolUp,
+    .motion = gio_onTabletToolMotion,
+    .pressure = gio_onTabletToolPressure,
+    .distance = gio_onTabletToolDistance,
+    .tilt = gio_onTabletToolTilt,
+    .rotation = gio_onTabletToolRotation,
+    .slider = gio_onTabletToolSlider,
+    .wheel = gio_onTabletToolWheel,
+    .button = gio_onTabletToolButton,
+    .frame = gio_onTabletToolFrame
+};
+
 
 const struct wl_data_device_listener gio_data_device_listener = {
 	.data_offer = gio_onDataDeviceOffer,
